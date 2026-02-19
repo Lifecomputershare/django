@@ -112,3 +112,12 @@ class AIMatchLog(models.Model):
     similarity_score = models.FloatField()
     keywords_matched = models.JSONField(default=list)
     processed_at = models.DateTimeField(auto_now_add=True)
+
+
+class UserAuditLog(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True)
+    method = models.CharField(max_length=8)
+    path = models.CharField(max_length=512)
+    status_code = models.IntegerField(null=True, blank=True)
+    ip_address = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)

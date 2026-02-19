@@ -1,9 +1,10 @@
 from django.utils import timezone
 from rest_framework import status, viewsets, permissions
-from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Company, SubscriptionPlan, CompanySubscription, Job, Application, AIMatchLog
+from SmartHire.responses import api_success, api_error
+from .models import Company, SubscriptionPlan, CompanySubscription, Job, Application, AIMatchLog, UserProfile
+from .permissions import IsAdminOrRecruiter
 from .serializers import (
     CompanySerializer,
     SubscriptionPlanSerializer,
@@ -15,9 +16,29 @@ from .serializers import (
 
 
 class CompanyViewSet(viewsets.ModelViewSet):
-    queryset = Company.objects.all()
     serializer_class = CompanySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrRecruiter]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return Company.objects.none()
+        profile = getattr(user, "profile", None)
+        if not profile:
+            return Company.objects.none()
+        if profile.role == UserProfile.ROLE_ADMIN:
+            return Company.objects.all()
+        if profile.company_id:
+            return Company.objects.filter(id=profile.company_id)
+        return Company.objects.none()
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        user = self.request.user
+        profile = getattr(user, "profile", None)
+        if profile and not profile.company:
+            profile.company = instance
+            profile.save(update_fields=["company"])
 
 
 class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
@@ -27,15 +48,51 @@ class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class JobViewSet(viewsets.ModelViewSet):
-    queryset = Job.objects.all()
     serializer_class = JobSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrRecruiter]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return Job.objects.none()
+        profile = getattr(user, "profile", None)
+        if not profile:
+            return Job.objects.filter(is_active=True)
+        if profile.role == UserProfile.ROLE_ADMIN:
+            return Job.objects.all()
+        if profile.role == UserProfile.ROLE_RECRUITER and profile.company_id:
+            return Job.objects.filter(company_id=profile.company_id)
+        if profile.role == UserProfile.ROLE_CANDIDATE:
+            return Job.objects.filter(is_active=True)
+        return Job.objects.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        profile = getattr(user, "profile", None)
+        if profile and profile.company:
+            serializer.save(company=profile.company)
+        else:
+            serializer.save()
 
 
 class ApplicationViewSet(viewsets.ModelViewSet):
-    queryset = Application.objects.all()
     serializer_class = ApplicationSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return Application.objects.none()
+        profile = getattr(user, "profile", None)
+        if profile and profile.role == UserProfile.ROLE_ADMIN:
+            return Application.objects.all()
+        if profile and profile.role == UserProfile.ROLE_RECRUITER and profile.company_id:
+            return Application.objects.filter(job__company_id=profile.company_id)
+        return Application.objects.filter(applicant=user)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        serializer.save(applicant=user)
 
 
 class CompanySubscriptionView(APIView):
@@ -44,9 +101,9 @@ class CompanySubscriptionView(APIView):
     def get(self, request):
         profile = getattr(request.user, "profile", None)
         if profile is None or profile.company is None:
-            return Response(
+            return api_error(
                 {"detail": "User is not linked to a company"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status.HTTP_400_BAD_REQUEST,
             )
         subscription = (
             CompanySubscription.objects.filter(company=profile.company, is_active=True)
@@ -54,12 +111,12 @@ class CompanySubscriptionView(APIView):
             .first()
         )
         if subscription is None:
-            return Response(
+            return api_error(
                 {"detail": "No active subscription found"},
-                status=status.HTTP_404_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
             )
         serializer = CompanySubscriptionSerializer(subscription)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return api_success(serializer.data, status_code=status.HTTP_200_OK)
 
 
 class SubscribeView(APIView):
@@ -68,22 +125,22 @@ class SubscribeView(APIView):
     def post(self, request):
         profile = getattr(request.user, "profile", None)
         if profile is None or profile.company is None:
-            return Response(
+            return api_error(
                 {"detail": "User is not linked to a company"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status.HTTP_400_BAD_REQUEST,
             )
         plan_id = request.data.get("plan_id")
         if not plan_id:
-            return Response(
+            return api_error(
                 {"detail": "plan_id is required"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status.HTTP_400_BAD_REQUEST,
             )
         try:
             plan = SubscriptionPlan.objects.get(id=plan_id)
         except SubscriptionPlan.DoesNotExist:
-            return Response(
+            return api_error(
                 {"detail": "Invalid plan_id"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status.HTTP_400_BAD_REQUEST,
             )
         start_date = timezone.now().date()
         end_date = start_date + timezone.timedelta(days=plan.duration_days)
@@ -94,7 +151,7 @@ class SubscribeView(APIView):
             end_date=end_date,
         )
         serializer = CompanySubscriptionSerializer(subscription)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return api_success(serializer.data, status_code=status.HTTP_201_CREATED)
 
 
 class AIMatchView(APIView):
@@ -104,9 +161,9 @@ class AIMatchView(APIView):
         try:
             application = Application.objects.get(id=pk)
         except Application.DoesNotExist:
-            return Response(
+            return api_error(
                 {"detail": "Application not found"},
-                status=status.HTTP_404_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
             )
         serializer = ApplicationSerializer(application)
         latest_log = (
@@ -119,16 +176,16 @@ class AIMatchView(APIView):
             "application": serializer.data,
             "latest_match_log": log_serializer.data if log_serializer else None,
         }
-        return Response(data, status=status.HTTP_200_OK)
+        return api_success(data, status_code=status.HTTP_200_OK)
 
 
 class StripePaymentView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        return Response(
+        return api_success(
             {"detail": "Stripe payment endpoint stub"},
-            status=status.HTTP_200_OK,
+            status_code=status.HTTP_200_OK,
         )
 
 
@@ -136,7 +193,7 @@ class KhaltiPaymentView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        return Response(
+        return api_success(
             {"detail": "Khalti payment endpoint stub"},
-            status=status.HTTP_200_OK,
+            status_code=status.HTTP_200_OK,
         )
