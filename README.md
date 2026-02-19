@@ -1,4 +1,4 @@
-# SmartHire Backend – User Manual
+# SmartHire Backend
 
 SmartHire is a Django-based backend that powers an AI‑assisted hiring platform.  
 It exposes a versioned REST API (`/api/v1/`) for:
